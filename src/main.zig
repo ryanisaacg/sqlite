@@ -25,19 +25,17 @@ pub fn main() !void {
 
         const header = try DBHeader.read(file);
 
-        // First page is metadata
-        var page_type_buf: [1]u8 = undefined;
+        // Read the first page
+        const first_page_buf = try allocator.alloc(u8, header.page_size);
+        defer allocator.free(first_page_buf);
         _ = try file.seekTo(100);
-        _ = try file.read(&page_type_buf);
-        std.debug.assert(page_type_buf[0] == 0x0D);
+        _ = try file.read(first_page_buf);
 
-        var table_count_buf: [2]u8 = undefined;
-        _ = try file.seekBy(2);
-        _ = try file.read(&table_count_buf);
-        const table_count = std.mem.readInt(u16, &table_count_buf, .big);
+        const first_page_view = DBPageView.new(first_page_buf);
 
         try std.io.getStdOut().writer().print("database page size: {}\n", .{header.page_size});
-        try std.io.getStdOut().writer().print("number of tables: {}\n", .{table_count});
+        //try std.io.getStdOut().writer().print("database page count: {}\n", .{header.page_count});
+        try std.io.getStdOut().writer().print("number of tables: {}\n", .{first_page_view.cell_count});
     }
 }
 
@@ -61,4 +59,43 @@ const DBHeader = struct {
 
         return DBHeader{ .page_size = page_size, .page_count = page_count };
     }
+};
+
+const DBPageView = struct {
+    page_type: DBPageType,
+    cell_count: u16,
+    cell_data: []u8,
+
+    pub fn new(buffer: []u8) DBPageView {
+        const page_type = switch (buffer[0]) {
+            0x02 => DBPageType.InteriorIndex,
+            0x05 => DBPageType.InteriorTable,
+            0x0A => DBPageType.LeafIndex,
+            0x0D => DBPageType.LeafTable,
+            else => unreachable,
+        };
+        // TODO: freeblocks
+        const cell_count = std.mem.readInt(u16, buffer[3..5], .big);
+        const cell_content_start = std.mem.readInt(u16, buffer[5..7], .big);
+        _ = cell_content_start; // TODO: what to do with this?
+        // TODO: fragmented free bytes
+        // TODO: right-most pointer for interior b trees
+        // LearnZig TODO: how do I create a conditional constant?
+        var header_size: usize = undefined;
+        if (page_type == DBPageType.InteriorTable) {
+            header_size = 12;
+        } else {
+            header_size = 8;
+        }
+        const cell_data = buffer[header_size..];
+
+        return DBPageView{ .page_type = page_type, .cell_count = cell_count, .cell_data = cell_data };
+    }
+};
+
+const DBPageType = enum {
+    InteriorTable,
+    LeafTable,
+    InteriorIndex,
+    LeafIndex,
 };
