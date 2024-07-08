@@ -21,13 +21,44 @@ pub fn main() !void {
         defer file.close();
 
         // You can use print statements as follows for debugging, they'll be visible when running tests.
-        try std.io.getStdOut().writer().print("Logs from your program will appear here\n", .{});
+        try std.io.getStdOut().writer().print("Logs from your src will appear here\n", .{});
 
-        // Uncomment this block to pass the first stage
-        var buf: [2]u8 = undefined;
-        _ = try file.seekTo(16);
-        _ = try file.read(&buf);
-        const page_size = std.mem.readInt(u16, &buf, .big);
-        try std.io.getStdOut().writer().print("database page size: {}\n", .{page_size});
+        const header = try DBHeader.read(file);
+
+        // First page is metadata
+        var page_type_buf: [1]u8 = undefined;
+        _ = try file.seekTo(100);
+        _ = try file.read(&page_type_buf);
+        std.debug.assert(page_type_buf[0] == 0x0D);
+
+        var table_count_buf: [2]u8 = undefined;
+        _ = try file.seekBy(2);
+        _ = try file.read(&table_count_buf);
+        const table_count = std.mem.readInt(u16, &table_count_buf, .big);
+
+        try std.io.getStdOut().writer().print("database page size: {}\n", .{header.page_size});
+        try std.io.getStdOut().writer().print("number of tables: {}\n", .{table_count});
     }
 }
+
+const DBHeader = struct {
+    page_size: u16,
+    page_count: u32,
+
+    fn read(file: std.fs.File) !DBHeader {
+        var page_size_buf: [2]u8 = undefined;
+        _ = try file.seekTo(16);
+        _ = try file.read(&page_size_buf);
+        const page_size = std.mem.readInt(u16, &page_size_buf, .big);
+
+        var page_count_buf: [4]u8 = undefined;
+        _ = try file.seekTo(28);
+        _ = try file.read(&page_count_buf);
+        const page_count = std.mem.readInt(u32, &page_count_buf, .big);
+
+        // Skip the rest of the header for now
+        _ = try file.seekTo(100);
+
+        return DBHeader{ .page_size = page_size, .page_count = page_count };
+    }
+};
