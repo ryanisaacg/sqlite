@@ -22,7 +22,7 @@ pub const DB = struct {
     }
 
     pub fn count_tables(self: *DB) !PageIndex {
-        return self.count_tables_recur(0);
+        return self.count_tables_recur(1);
     }
 
     fn count_tables_recur(self: *DB, page_idx: PageIndex) !PageIndex {
@@ -41,6 +41,7 @@ pub const DB = struct {
             const child_page_idx = std.mem.readInt(PageIndex, cell_buf, .big);
             table_count += try self.count_tables_recur(child_page_idx);
         }
+        table_count += try self.count_tables_recur(page.right_most);
         return table_count;
     }
 
@@ -50,10 +51,16 @@ pub const DB = struct {
         if (self.page_cache.get(page_idx)) |page| {
             return page.view;
         } else {
-            _ = try self.file.seekTo(DB_HEADER_SIZE + self.info.page_size * page_idx);
+            const is_first_page = page_idx == 1;
+            var page_offset = self.info.page_size * (page_idx - 1);
+            if (is_first_page) {
+                page_offset += DB_HEADER_SIZE;
+            }
+            _ = try self.file.seekTo(page_offset);
             const page_buf = try self.allocator.alloc(u8, self.info.page_size);
             _ = try self.file.read(page_buf);
-            const view = DBPageView.new(page_buf);
+
+            const view = DBPageView.new(page_buf, is_first_page);
             const page = DBPage{ .buffer = page_buf, .view = view };
             _ = try self.page_cache.put(page_idx, page);
             return view;
@@ -101,12 +108,14 @@ const DBPage = struct {
 const DBPageView = struct {
     page_type: DBPageType,
     cell_count: u16,
-    cell_offsets: [*]u16,
+    cell_offsets: []u8,
     cell_content_start: u16,
     cell_data: []u8,
     buffer: []u8,
+    is_first_page: bool,
+    right_most: PageIndex,
 
-    pub fn new(buffer: []u8) DBPageView {
+    pub fn new(buffer: []u8, is_first_page: bool) DBPageView {
         const page_type = switch (buffer[0]) {
             0x02 => DBPageType.InteriorIndex,
             0x05 => DBPageType.InteriorTable,
@@ -121,33 +130,30 @@ const DBPageView = struct {
         // TODO: right-most pointer for interior b trees
         // LearnZig TODO: how do I create a conditional constant?
         var header_size: usize = undefined;
+        var right_most: PageIndex = undefined;
         if (page_type == DBPageType.InteriorTable) {
             header_size = 12;
+            right_most = std.mem.readInt(PageIndex, buffer[8..12], .big);
         } else {
             header_size = 8;
         }
         const cell_data = buffer[header_size..];
         const cell_offsets_buf = buffer[header_size..(header_size + cell_count * 2)];
-        const cell_offsets: [*]u16 = @ptrCast(@alignCast(cell_offsets_buf));
 
-        return DBPageView{
-            .page_type = page_type,
-            .cell_count = cell_count,
-            .cell_offsets = cell_offsets,
-            .cell_data = cell_data,
-            .buffer = buffer,
-            .cell_content_start = cell_content_start,
-        };
+        return DBPageView{ .page_type = page_type, .cell_count = cell_count, .cell_offsets = cell_offsets_buf, .cell_data = cell_data, .buffer = buffer, .cell_content_start = cell_content_start, .is_first_page = is_first_page, .right_most = right_most };
     }
 
     pub fn cell(self: *const DBPageView, cell_idx: u16) [*]u8 {
-        _ = std.io.getStdOut().writer().print("{}\n", .{cell_idx}) catch {};
         std.debug.assert(cell_idx < self.cell_count);
-        const offset = self.cell_offsets[cell_idx];
-        @breakpoint();
-        _ = std.io.getStdOut().writer().print("{}\n", .{self.cell_content_start}) catch {};
-        _ = std.io.getStdOut().writer().print("{}\n", .{offset}) catch {};
-        const ptr: [*]u8 = @ptrCast(&self.buffer[offset]);
+        var offset_buf: [2]u8 = undefined;
+        // TODO: what's the right way to do this
+        offset_buf[0] = self.cell_offsets[cell_idx * 2];
+        offset_buf[1] = self.cell_offsets[cell_idx * 2 + 1];
+        var offset = std.mem.readInt(u16, &offset_buf, .big);
+        if (self.is_first_page) {
+            offset -= 100;
+        }
+        const ptr: [*]u8 = @ptrCast(&self.buffer[@intCast(offset)]);
         return ptr;
     }
 };
