@@ -1,9 +1,10 @@
 const std = @import("std");
 
-const HEADER_SIZE = 100;
+const DB_HEADER_SIZE = 100;
+const PageIndex = u32;
 
 pub const DB = struct {
-    const PageCache = std.AutoHashMap(u64, DBPage);
+    const PageCache = std.AutoHashMap(PageIndex, DBPage);
 
     // misc
     allocator: std.mem.Allocator,
@@ -20,19 +21,36 @@ pub const DB = struct {
         return DB{ .info = header, .allocator = allocator, .page_cache = page_cache, .file = file };
     }
 
-    pub fn count_tables(self: *DB) !u64 {
-        const page = try self.load_page(0);
-
-        return page.cell_count;
+    pub fn count_tables(self: *DB) !PageIndex {
+        return self.count_tables_recur(0);
     }
 
-    fn load_page(self: *DB, page_idx: u64) !DBPageView {
+    fn count_tables_recur(self: *DB, page_idx: PageIndex) !PageIndex {
+        const page = try self.load_page(page_idx);
+        switch (page.page_type) {
+            .LeafTable => return page.cell_count,
+            .LeafIndex => unreachable,
+            .InteriorIndex => unreachable,
+            .InteriorTable => {},
+        }
+        // Handle interior table pages
+        var table_count: PageIndex = 0;
+        for (0..page.cell_count) |idx| {
+            const cell_ptr = page.cell(@intCast(idx));
+            const cell_buf = cell_ptr[0..4];
+            const child_page_idx = std.mem.readInt(PageIndex, cell_buf, .big);
+            table_count += try self.count_tables_recur(child_page_idx);
+        }
+        return table_count;
+    }
+
+    fn load_page(self: *DB, page_idx: PageIndex) !DBPageView {
         std.debug.assert(page_idx < self.info.page_count);
 
         if (self.page_cache.get(page_idx)) |page| {
             return page.view;
         } else {
-            _ = try self.file.seekTo(HEADER_SIZE + self.info.page_size * page_idx);
+            _ = try self.file.seekTo(DB_HEADER_SIZE + self.info.page_size * page_idx);
             const page_buf = try self.allocator.alloc(u8, self.info.page_size);
             _ = try self.file.read(page_buf);
             const view = DBPageView.new(page_buf);
@@ -83,7 +101,10 @@ const DBPage = struct {
 const DBPageView = struct {
     page_type: DBPageType,
     cell_count: u16,
+    cell_offsets: [*]u16,
+    cell_content_start: u16,
     cell_data: []u8,
+    buffer: []u8,
 
     pub fn new(buffer: []u8) DBPageView {
         const page_type = switch (buffer[0]) {
@@ -96,7 +117,6 @@ const DBPageView = struct {
         // TODO: freeblocks
         const cell_count = std.mem.readInt(u16, buffer[3..5], .big);
         const cell_content_start = std.mem.readInt(u16, buffer[5..7], .big);
-        _ = cell_content_start; // TODO: what to do with this?
         // TODO: fragmented free bytes
         // TODO: right-most pointer for interior b trees
         // LearnZig TODO: how do I create a conditional constant?
@@ -107,8 +127,28 @@ const DBPageView = struct {
             header_size = 8;
         }
         const cell_data = buffer[header_size..];
+        const cell_offsets_buf = buffer[header_size..(header_size + cell_count * 2)];
+        const cell_offsets: [*]u16 = @ptrCast(@alignCast(cell_offsets_buf));
 
-        return DBPageView{ .page_type = page_type, .cell_count = cell_count, .cell_data = cell_data };
+        return DBPageView{
+            .page_type = page_type,
+            .cell_count = cell_count,
+            .cell_offsets = cell_offsets,
+            .cell_data = cell_data,
+            .buffer = buffer,
+            .cell_content_start = cell_content_start,
+        };
+    }
+
+    pub fn cell(self: *const DBPageView, cell_idx: u16) [*]u8 {
+        _ = std.io.getStdOut().writer().print("{}\n", .{cell_idx}) catch {};
+        std.debug.assert(cell_idx < self.cell_count);
+        const offset = self.cell_offsets[cell_idx];
+        @breakpoint();
+        _ = std.io.getStdOut().writer().print("{}\n", .{self.cell_content_start}) catch {};
+        _ = std.io.getStdOut().writer().print("{}\n", .{offset}) catch {};
+        const ptr: [*]u8 = @ptrCast(&self.buffer[offset]);
+        return ptr;
     }
 };
 
