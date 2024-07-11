@@ -32,5 +32,7 @@ pub fn main() !void {
         try std.io.getStdOut().writer().print("database page size: {}\n", .{db.info.page_size});
         //try std.io.getStdOut().writer().print("database page count: {}\n", .{header.page_count});
         try std.io.getStdOut().writer().print("number of tables: {}\n", .{table_count});
+
+        try db.print_names();
     }
 }

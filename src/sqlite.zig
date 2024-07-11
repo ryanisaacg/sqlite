@@ -36,13 +36,49 @@ pub const DB = struct {
         // Handle interior table pages
         var table_count: PageIndex = 0;
         for (0..page.cell_count) |idx| {
-            const cell_ptr = page.cell(@intCast(idx));
-            const cell_buf = cell_ptr[0..4];
-            const child_page_idx = std.mem.readInt(PageIndex, cell_buf, .big);
-            table_count += try self.count_tables_recur(child_page_idx);
+            table_count += try self.count_tables_recur(page.table_interior_cell_data(@intCast(idx)));
         }
         table_count += try self.count_tables_recur(page.right_most);
         return table_count;
+    }
+
+    pub fn print_names(self: *DB) !void {
+        try self.print_names_recur(1);
+    }
+
+    fn print_names_recur(self: *DB, page_idx: PageIndex) !void {
+        const page = try self.load_page(page_idx);
+        if (page.page_type == .LeafTable) {
+            for (0..page.cell_count) |idx| {
+                const cell = page.table_leaf_cell_data(@intCast(idx));
+                var header_ptr: [*]u8 = @ptrCast(cell.header);
+                var encoded_type: u64 = undefined;
+                header_ptr = read_varint(header_ptr, &encoded_type);
+
+                // TODO: helpers for managing leaf cell headers and contents
+
+                std.debug.assert(encoded_type > 13);
+                const type_len = (encoded_type - 13) / 2;
+                const type_str = cell.contents[0..type_len];
+                if (!std.mem.eql(u8, type_str, "table")) {
+                    continue;
+                }
+
+                var name_varint: u64 = undefined;
+                header_ptr = read_varint(header_ptr, &name_varint);
+                const name_len = (name_varint - 13) / 2;
+                const name = cell.contents[type_len .. type_len + name_len];
+
+                if (!std.mem.eql(u8, name, "sqlite_sequence")) {
+                    try std.io.getStdOut().writer().print("{s}\n", .{name});
+                }
+            }
+        } else {
+            for (0..page.cell_count) |idx| {
+                try self.print_names_recur(page.table_interior_cell_data(@intCast(idx)));
+            }
+            try self.print_names_recur(page.right_most);
+        }
     }
 
     fn load_page(self: *DB, page_idx: PageIndex) !DBPageView {
@@ -143,7 +179,7 @@ const DBPageView = struct {
         return DBPageView{ .page_type = page_type, .cell_count = cell_count, .cell_offsets = cell_offsets_buf, .cell_data = cell_data, .buffer = buffer, .cell_content_start = cell_content_start, .is_first_page = is_first_page, .right_most = right_most };
     }
 
-    pub fn cell(self: *const DBPageView, cell_idx: u16) [*]u8 {
+    pub fn cell_ptr(self: *const DBPageView, cell_idx: u16) [*]u8 {
         std.debug.assert(cell_idx < self.cell_count);
         var offset_buf: [2]u8 = undefined;
         std.mem.copyForwards(u8, &offset_buf, self.cell_offsets[cell_idx * 2 .. cell_idx * 2 + 2]);
@@ -154,6 +190,33 @@ const DBPageView = struct {
         const ptr: [*]u8 = @ptrCast(&self.buffer[@intCast(offset)]);
         return ptr;
     }
+
+    pub fn table_interior_cell_data(self: *const DBPageView, cell_idx: u16) u32 {
+        const cell_ptr_ = self.cell_ptr(cell_idx);
+        const cell_buf = cell_ptr_[0..4];
+        const child_page_idx = std.mem.readInt(PageIndex, cell_buf, .big);
+        return child_page_idx;
+    }
+
+    pub fn table_leaf_cell_data(self: *const DBPageView, cell_idx: u16) TableLeafCellData {
+        var cell_ptr_ = self.cell_ptr(@intCast(cell_idx));
+        var cell_len: u64 = undefined;
+        cell_ptr_ = read_varint(cell_ptr_, &cell_len);
+        var rowid: u64 = undefined;
+        cell_ptr_ = read_varint(cell_ptr_, &rowid);
+
+        // Importantly header_len includes itself - don't move cell_ptr_
+        var header_len: u64 = undefined;
+        const after_header = read_varint(cell_ptr_, &header_len);
+        const header_offset = @intFromPtr(after_header) - @intFromPtr(cell_ptr_);
+
+        // TODO: care about header?
+        // TODO: handle overflow
+
+        const header = cell_ptr_[header_offset..header_len];
+        const contents = cell_ptr_[header_len..cell_len];
+        return .{ .header = header, .contents = contents, .rowid = rowid };
+    }
 };
 
 const DBPageType = enum {
@@ -162,3 +225,60 @@ const DBPageType = enum {
     InteriorIndex,
     LeafIndex,
 };
+
+const TableLeafCellData = struct {
+    header: []u8,
+    contents: []u8,
+    rowid: u64,
+};
+
+const ReadVarint = struct {
+    value: u64,
+    bytes_read: usize,
+};
+
+fn read_varint(source: [*]u8, value: *u64) [*]u8 {
+    value.* = 0;
+    var bytes_read: usize = 0;
+
+    while (true) {
+        const byte = source[bytes_read];
+        bytes_read += 1;
+
+        value.* <<= 7;
+        value.* |= byte & 0x7F;
+
+        if (value.* & 0x80 == 0) {
+            break;
+        }
+    }
+
+    return source + bytes_read;
+}
+
+//func ReadVarint(reader *bytes.Reader) (int64, int, error) {
+//	var result int64
+//	var bytesRead int
+//
+//	for {
+//		// Read a single byte
+//		b, err := reader.ReadByte()
+//		if err != nil {
+//			return 0, bytesRead, err
+//		}
+//
+//		bytesRead++
+//
+//		result = result << 7 // FIXME: handle last byte?
+//
+//		// Combine the lower 7 bits into the result
+//		result |= int64(b & 0x7F)
+//
+//		// Check if the MSB is set; if not, we are done
+//		if b&0x80 == 0 {
+//			break
+//		}
+//	}
+//
+//	return result, bytesRead, nil
+//}
