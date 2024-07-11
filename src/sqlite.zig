@@ -146,9 +146,7 @@ const DBPageView = struct {
     pub fn cell(self: *const DBPageView, cell_idx: u16) [*]u8 {
         std.debug.assert(cell_idx < self.cell_count);
         var offset_buf: [2]u8 = undefined;
-        // TODO: what's the right way to do this
-        offset_buf[0] = self.cell_offsets[cell_idx * 2];
-        offset_buf[1] = self.cell_offsets[cell_idx * 2 + 1];
+        std.mem.copyForwards(u8, &offset_buf, self.cell_offsets[cell_idx * 2 .. cell_idx * 2 + 2]);
         var offset = std.mem.readInt(u16, &offset_buf, .big);
         if (self.is_first_page) {
             offset -= 100;
